@@ -1,6 +1,9 @@
 import { kv } from '@vercel/kv';
 import { XMLParser } from 'fast-xml-parser';
 
+// This is the list of news sources we check.
+// "url" = where the news comes from
+// "cat" = which category it gets grouped under
 const FEEDS = [
   { name: "TechCrunch AI", url: "https://techcrunch.com/category/artificial-intelligence/feed/", cat: "Industry" },
   { name: "VentureBeat AI", url: "https://venturebeat.com/category/ai/feed/", cat: "Industry" },
@@ -10,6 +13,8 @@ const FEEDS = [
   { name: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index/", cat: "Policy" },
 ];
 
+// These are the hashtags. If a headline contains one of these words/phrases,
+// it gets that hashtag automatically.
 const KEYWORDS = {
   "#OpenAI": /openai|gpt|chatgpt/i,
   "#Anthropic": /anthropic|claude/i,
@@ -29,15 +34,26 @@ function getTags(text) {
 
 const parser = new XMLParser({ ignoreAttributes: false });
 
+// Goes and fetches one news source, turns the raw feed into a clean list
 async function fetchFeed(feed) {
   try {
     const res = await fetch(feed.url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (AI News Aggregator)' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+      },
       signal: AbortSignal.timeout(10000),
     });
+
+    if (!res.ok) {
+      return { items: [], debug: { name: feed.name, status: res.status, error: `HTTP ${res.status}` } };
+    }
+
     const text = await res.text();
     const data = parser.parse(text);
 
+    // RSS feeds and Atom feeds are structured slightly differently,
+    // so we check for both shapes
     const rawItems =
       data?.rss?.channel?.item ||
       data?.feed?.entry ||
@@ -45,7 +61,7 @@ async function fetchFeed(feed) {
 
     const itemsArray = Array.isArray(rawItems) ? rawItems : [rawItems];
 
-    return itemsArray.slice(0, 10).map((item) => {
+    const items = itemsArray.slice(0, 10).map((item) => {
       const title = (item.title?.['#text'] || item.title || '').toString().trim();
       let link = item.link?.['@_href'] || item.link || '';
       if (typeof link === 'object') link = link['#text'] || '';
@@ -60,21 +76,26 @@ async function fetchFeed(feed) {
         tags: getTags(title),
       };
     }).filter(i => i.title && i.link);
+
+    return { items, debug: { name: feed.name, status: res.status, count: items.length } };
   } catch (err) {
-    console.error(`Failed to fetch ${feed.name}:`, err.message);
-    return [];
+    return { items: [], debug: { name: feed.name, status: 'ERR', error: err.message } };
   }
 }
 
 export async function GET(request) {
+  // Security check: only allow this to run if the request includes our secret password
   const authHeader = request.headers.get('authorization');
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response('Unauthorized', { status: 401 });
   }
 
+  // Go fetch all 6 sources at the same time
   const results = await Promise.all(FEEDS.map(fetchFeed));
-  let allItems = results.flat();
+  let allItems = results.flatMap(r => r.items);
+  const debugInfo = results.map(r => r.debug);
 
+  // Remove duplicate stories (same link)
   const seen = new Set();
   allItems = allItems.filter((item) => {
     if (seen.has(item.link)) return false;
@@ -82,9 +103,13 @@ export async function GET(request) {
     return true;
   });
 
+  // Newest first
   allItems.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  // Keep only the most recent 100 stories to keep things fast
   allItems = allItems.slice(0, 100);
 
+  // Save to the database (Vercel KV) along with the time we updated it
   await kv.set('news-items', allItems);
   await kv.set('last-updated', new Date().toISOString());
 
@@ -92,5 +117,6 @@ export async function GET(request) {
     success: true,
     count: allItems.length,
     updated: new Date().toISOString(),
+    debug: debugInfo,
   });
 }
