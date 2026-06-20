@@ -4,13 +4,19 @@ import { XMLParser } from 'fast-xml-parser';
 // This is the list of news sources we check.
 // "url" = where the news comes from
 // "cat" = which category it gets grouped under
+// "cap" = max items to take from this source (keeps research/slow sources from crowding the feed)
 const FEEDS = [
-  { name: "TechCrunch AI", url: "https://techcrunch.com/category/artificial-intelligence/feed/", cat: "Industry" },
-  { name: "VentureBeat AI", url: "https://venturebeat.com/category/ai/feed/", cat: "Industry" },
-  { name: "MIT Tech Review", url: "https://www.technologyreview.com/topic/artificial-intelligence/feed", cat: "Research" },
-  { name: "ArXiv cs.AI", url: "http://export.arxiv.org/rss/cs.AI", cat: "Research" },
-  { name: "The Verge AI", url: "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml", cat: "Tools" },
-  { name: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index/", cat: "Policy" },
+  { name: "TechCabal", url: "https://techcabal.com/feed/", cat: "Africa Tech & Funding", cap: 15 },
+  { name: "Techpoint Africa", url: "https://techpoint.africa/feed/", cat: "Africa Tech & Funding", cap: 15 },
+  { name: "Google News: AI Africa", url: "https://news.google.com/rss/search?q=AI+Africa+when:2d&hl=en-NG&gl=NG&ceid=NG:en", cat: "Africa Tech & Funding", cap: 12 },
+  { name: "Google News: AI Creative Africa", url: "https://news.google.com/rss/search?q=AI+creative+economy+OR+Nollywood+OR+%22AI+music%22+Africa+when:5d&hl=en-NG&gl=NG&ceid=NG:en", cat: "Africa Tech & Funding", cap: 12 },
+  { name: "Google News: AI Policy Africa", url: "https://news.google.com/rss/search?q=%22AI+policy%22+OR+NITDA+OR+%22AI+strategy%22+Nigeria+OR+Africa+when:5d&hl=en-NG&gl=NG&ceid=NG:en", cat: "Policy & Regulation", cap: 10 },
+  { name: "Google News: AI Film & Movies", url: "https://news.google.com/rss/search?q=%22AI%22+film+OR+movie+OR+Hollywood+OR+Nollywood+when:3d&hl=en-NG&gl=NG&ceid=NG:en", cat: "Global AI Industry", cap: 8 },
+  { name: "Rest of World", url: "https://www.restofworld.org/feed/", cat: "Global AI Industry", cap: 10 },
+  { name: "TechCrunch AI", url: "https://techcrunch.com/category/artificial-intelligence/feed/", cat: "Global AI Industry", cap: 15 },
+  { name: "VentureBeat AI", url: "https://venturebeat.com/category/ai/feed/", cat: "Global AI Industry", cap: 15 },
+  { name: "Hacker News: AI", url: "https://hnrss.org/newest?q=AI&points=50", cat: "Global AI Industry", cap: 10 },
+  { name: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index/", cat: "Policy & Regulation", cap: 10 },
 ];
 
 // These are the hashtags. If a headline contains one of these words/phrases,
@@ -20,16 +26,45 @@ const KEYWORDS = {
   "#Anthropic": /anthropic|claude/i,
   "#Google": /google|gemini|deepmind/i,
   "#Meta": /\bmeta\b|llama/i,
+  "#xAI": /\bxai\b|grok/i,
   "#Robotics": /robot/i,
   "#LLM": /large language model|\bllm\b/i,
-  "#Regulation": /regulat|policy|congress|eu ai act|lawsuit/i,
+  "#AGI": /\bagi\b|artificial general intelligence/i,
+  "#ComputerVision": /computer vision|image recognition/i,
+  "#AIethics": /ethic|bias|fairness in ai/i,
+  "#Regulation": /regulat|\bpolicy\b|congress|eu ai act|lawsuit|govern/i,
   "#Research": /paper|study|arxiv/i,
-  "#Funding": /funding|raise[sd]?|valuation|series [a-e]/i,
+  "#Funding": /funding|raise[sd]?|valuation|series [a-e]|investment/i,
+  "#Acquisition": /acqui|merger|buyout/i,
+  "#Launch": /launch|unveil|introduc|debut/i,
   "#Hardware": /\bchip|gpu|nvidia|hardware/i,
+  "#Nigeria": /nigeria|lagos|naira/i,
+  "#Kenya": /kenya|nairobi/i,
+  "#SouthAfrica": /south africa|johannesburg|cape town/i,
+  "#Fintech": /fintech|payment|mobile money/i,
+  "#Startup": /startup|founder/i,
+  "#Fashion": /fashion|design house|textile|apparel/i,
+  "#Film": /film|nollywood|movie|cinema|studio|\bvfx\b|hollywood|streaming/i,
+  "#Music": /\bmusic\b|afrobeat|sound design/i,
+  "#Health": /health|medical|diagnos|hospital/i,
+  "#Agriculture": /agri|farm|crop/i,
+  "#Education": /education|edtech|learning platform|university/i,
+  "#Creative": /creative econom|artist|design(?!ed for)/i,
 };
 
 function getTags(text) {
   return Object.keys(KEYWORDS).filter((tag) => KEYWORDS[tag].test(text));
+}
+
+// RSS feeds often contain HTML-encoded characters like &#8217; (curly apostrophe)
+// or &amp; (ampersand). This converts them back to normal readable text.
+function decodeHtmlEntities(text) {
+  const entities = {
+    '&#8217;': "'", '&#8216;': "'", '&#8220;': '"', '&#8221;': '"',
+    '&#8211;': '–', '&#8212;': '—', '&amp;': '&', '&quot;': '"',
+    '&#39;': "'", '&apos;': "'", '&lt;': '<', '&gt;': '>', '&nbsp;': ' ',
+  };
+  return text.replace(/&#?\w+;/g, (match) => entities[match] || match);
 }
 
 const parser = new XMLParser({ ignoreAttributes: false });
@@ -61,8 +96,9 @@ async function fetchFeed(feed) {
 
     const itemsArray = Array.isArray(rawItems) ? rawItems : [rawItems];
 
-    const items = itemsArray.slice(0, 10).map((item) => {
-      const title = (item.title?.['#text'] || item.title || '').toString().trim();
+    const items = itemsArray.slice(0, feed.cap || 10).map((item) => {
+      const rawTitle = (item.title?.['#text'] || item.title || '').toString().trim();
+      const title = decodeHtmlEntities(rawTitle);
       let link = item.link?.['@_href'] || item.link || '';
       if (typeof link === 'object') link = link['#text'] || '';
       const pubDate = item.pubDate || item.published || item.updated || new Date().toISOString();
@@ -106,17 +142,23 @@ export async function GET(request) {
   // Newest first
   allItems.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-  // Keep only the most recent 100 stories to keep things fast
-  allItems = allItems.slice(0, 100);
+  // Freshness rule: keep items from the last 7 days as a safety net (so the
+  // feed is never empty), but the website itself will default to showing
+  // only last 48 hours and let users expand if they want
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  allItems = allItems.filter((item) => new Date(item.date).getTime() > sevenDaysAgo);
+
+  // Keep only the most recent 150 stories to keep things fast
+  allItems = allItems.slice(0, 150);
 
   // Save to the database (Vercel KV) along with the time we updated it
   await kv.set('news-items', allItems);
   await kv.set('last-updated', new Date().toISOString());
+  await kv.set('source-health', debugInfo);
 
   return Response.json({
     success: true,
     count: allItems.length,
     updated: new Date().toISOString(),
-    debug: debugInfo,
   });
 }
