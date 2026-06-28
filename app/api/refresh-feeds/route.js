@@ -134,7 +134,7 @@ async function fetchFeed(feed) {
       };
     }));
 
-    return { items: items.filter(i => i.title && i.link), debug: { name: feed.name, status: res.status, count: items.length } };
+    return { items: items.filter(i => i.title && i.link && !i.link.includes('news.google.com')), debug: { name: feed.name, status: res.status, count: items.length } };
   } catch (err) {
     return { items: [], debug: { name: feed.name, status: 'ERR', error: err.message } };
   }
