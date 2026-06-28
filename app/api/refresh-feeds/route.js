@@ -1,10 +1,11 @@
-import { kv } from '@vercel/kv';
+import { Redis } from '@upstash/redis';
 import { XMLParser } from 'fast-xml-parser';
 
-// This is the list of news sources we check.
-// "url" = where the news comes from
-// "cat" = which category it gets grouped under
-// "cap" = max items to take from this source (keeps research/slow sources from crowding the feed)
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL,
+  token: process.env.KV_REST_API_TOKEN,
+});
+
 const FEEDS = [
   { name: "TechCabal", url: "https://techcabal.com/feed/", cat: "Africa Tech & Funding", cap: 15 },
   { name: "Techpoint Africa", url: "https://techpoint.africa/feed/", cat: "Africa Tech & Funding", cap: 15 },
@@ -19,8 +20,6 @@ const FEEDS = [
   { name: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index/", cat: "Policy & Regulation", cap: 10 },
 ];
 
-// These are the hashtags. If a headline contains one of these words/phrases,
-// it gets that hashtag automatically.
 const KEYWORDS = {
   "#OpenAI": /openai|gpt|chatgpt/i,
   "#Anthropic": /anthropic|claude/i,
@@ -56,8 +55,6 @@ function getTags(text) {
   return Object.keys(KEYWORDS).filter((tag) => KEYWORDS[tag].test(text));
 }
 
-// RSS feeds often contain HTML-encoded characters like &#8217; (curly apostrophe)
-// or &amp; (ampersand). This converts them back to normal readable text.
 function decodeHtmlEntities(text) {
   const entities = {
     '&#8217;': "'", '&#8216;': "'", '&#8220;': '"', '&#8221;': '"',
@@ -69,7 +66,6 @@ function decodeHtmlEntities(text) {
 
 const parser = new XMLParser({ ignoreAttributes: false });
 
-// Goes and fetches one news source, turns the raw feed into a clean list
 async function fetchFeed(feed) {
   try {
     const res = await fetch(feed.url, {
@@ -87,13 +83,7 @@ async function fetchFeed(feed) {
     const text = await res.text();
     const data = parser.parse(text);
 
-    // RSS feeds and Atom feeds are structured slightly differently,
-    // so we check for both shapes
-    const rawItems =
-      data?.rss?.channel?.item ||
-      data?.feed?.entry ||
-      [];
-
+    const rawItems = data?.rss?.channel?.item || data?.feed?.entry || [];
     const itemsArray = Array.isArray(rawItems) ? rawItems : [rawItems];
 
     const items = itemsArray.slice(0, feed.cap || 10).map((item) => {
@@ -120,18 +110,15 @@ async function fetchFeed(feed) {
 }
 
 export async function GET(request) {
-  // Security check: only allow this to run if the request includes our secret password
   const authHeader = request.headers.get('authorization');
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  // Go fetch all 6 sources at the same time
   const results = await Promise.all(FEEDS.map(fetchFeed));
   let allItems = results.flatMap(r => r.items);
   const debugInfo = results.map(r => r.debug);
 
-  // Remove duplicate stories (same link)
   const seen = new Set();
   allItems = allItems.filter((item) => {
     if (seen.has(item.link)) return false;
@@ -139,26 +126,20 @@ export async function GET(request) {
     return true;
   });
 
-  // Newest first
   allItems.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-  // Freshness rule: keep items from the last 7 days as a safety net (so the
-  // feed is never empty), but the website itself will default to showing
-  // only last 48 hours and let users expand if they want
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   allItems = allItems.filter((item) => new Date(item.date).getTime() > sevenDaysAgo);
-
-  // Keep only the most recent 150 stories to keep things fast
   allItems = allItems.slice(0, 150);
 
-  // Save to the database (Vercel KV) along with the time we updated it
-  await kv.set('news-items', allItems);
-  await kv.set('last-updated', new Date().toISOString());
-  await kv.set('source-health', debugInfo);
+  await redis.set('news-items', JSON.stringify(allItems));
+  await redis.set('last-updated', new Date().toISOString());
+  await redis.set('source-health', JSON.stringify(debugInfo));
 
   return Response.json({
     success: true,
     count: allItems.length,
     updated: new Date().toISOString(),
+    debug: debugInfo,
   });
 }
