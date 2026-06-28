@@ -7,12 +7,12 @@ const redis = new Redis({
 
 export async function GET() {
   try {
-    const raw = await redis.get('news-items');
-    const items = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+    const raw = await redis.get('source-health');
+    const health = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
     const lastUpdated = await redis.get('last-updated') || null;
 
-    return Response.json({ items, lastUpdated });
+    return Response.json({ health, lastUpdated });
   } catch (err) {
-    return Response.json({ items: [], lastUpdated: null, error: err.message });
+    return Response.json({ health: [], lastUpdated: null, error: err.message });
   }
 }
