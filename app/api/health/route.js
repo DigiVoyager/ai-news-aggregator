@@ -1,13 +1,18 @@
-import { kv } from '@vercel/kv';
+import { Redis } from '@upstash/redis';
 
-// This just reads whatever the refresh job last saved about each source's
-// status (did it succeed, fail, how many stories did it return).
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL,
+  token: process.env.KV_REST_API_TOKEN,
+});
+
 export async function GET() {
-  const health = await kv.get('source-health') || [];
-  const lastUpdated = await kv.get('last-updated') || null;
+  try {
+    const raw = await redis.get('news-items');
+    const items = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+    const lastUpdated = await redis.get('last-updated') || null;
 
-  return Response.json({
-    health,
-    lastUpdated,
-  });
+    return Response.json({ items, lastUpdated });
+  } catch (err) {
+    return Response.json({ items: [], lastUpdated: null, error: err.message });
+  }
 }
