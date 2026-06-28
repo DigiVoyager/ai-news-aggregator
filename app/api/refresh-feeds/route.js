@@ -64,6 +64,30 @@ function decodeHtmlEntities(text) {
   return text.replace(/&#?\w+;/g, (match) => entities[match] || match);
 }
 
+// Google News RSS links are encoded redirects that require a browser session.
+// This extracts the actual article URL from the encoded link using their
+// public decode endpoint, falling back to the original if it fails.
+async function decodeGoogleNewsUrl(encodedUrl) {
+  try {
+    if (!encodedUrl.includes('news.google.com')) return encodedUrl;
+    const res = await fetch(
+      `https://news.google.com/rss/articles/${encodedUrl.split('/articles/')[1]}`,
+      {
+        method: 'HEAD',
+        redirect: 'follow',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        signal: AbortSignal.timeout(5000),
+      }
+    );
+    if (res.url && !res.url.includes('news.google.com')) return res.url;
+    return encodedUrl;
+  } catch {
+    return encodedUrl;
+  }
+}
+
 const parser = new XMLParser({ ignoreAttributes: false });
 
 async function fetchFeed(feed) {
@@ -86,24 +110,31 @@ async function fetchFeed(feed) {
     const rawItems = data?.rss?.channel?.item || data?.feed?.entry || [];
     const itemsArray = Array.isArray(rawItems) ? rawItems : [rawItems];
 
-    const items = itemsArray.slice(0, feed.cap || 10).map((item) => {
+    const items = await Promise.all(itemsArray.slice(0, feed.cap || 10).map(async (item) => {
       const rawTitle = (item.title?.['#text'] || item.title || '').toString().trim();
       const title = decodeHtmlEntities(rawTitle);
       let link = item.link?.['@_href'] || item.link || '';
       if (typeof link === 'object') link = link['#text'] || '';
+      link = link.toString().trim();
+
+      // Decode Google News encoded redirect URLs to real article links
+      if (link.includes('news.google.com')) {
+        link = await decodeGoogleNewsUrl(link);
+      }
+
       const pubDate = item.pubDate || item.published || item.updated || new Date().toISOString();
 
       return {
         title,
-        link: link.toString().trim(),
+        link,
         source: feed.name,
         category: feed.cat,
         date: new Date(pubDate).toISOString(),
         tags: getTags(title),
       };
-    }).filter(i => i.title && i.link);
+    }));
 
-    return { items, debug: { name: feed.name, status: res.status, count: items.length } };
+    return { items: items.filter(i => i.title && i.link), debug: { name: feed.name, status: res.status, count: items.length } };
   } catch (err) {
     return { items: [], debug: { name: feed.name, status: 'ERR', error: err.message } };
   }
